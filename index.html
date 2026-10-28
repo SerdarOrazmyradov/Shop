@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#570df8">
+<title>Shop • Modern E-commerce</title>
+
+<!-- Favicon (data URI SVG) -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%23570df8'/%3E%3Ctext x='50' y='72' font-size='60' text-anchor='middle'%3E🛍%3C/text%3E%3C/svg%3E">
+
+<!-- Tailwind + DaisyUI -->
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://cdn.jsdelivr.net/npm/daisyui@4/dist/full.min.css" rel="stylesheet">
+
+<!-- Lucide Icons -->
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+
+<style>
+  .fade-in { animation: fadeIn .3s ease-out; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+</style>
+</head>
+<body class="min-h-screen bg-base-200">
+
+<!-- Navbar -->
+<div class="navbar bg-base-100 shadow-md sticky top-0 z-40">
+  <div class="navbar-start">
+    <a href="#/" class="btn btn-ghost text-xl gap-2">
+      <i data-lucide="shopping-bag"></i><span class="hidden sm:inline">Shop</span>
+    </a>
+  </div>
+  <div class="navbar-center hidden md:flex gap-1">
+    <a href="#/" class="btn btn-ghost btn-sm">Home</a>
+    <a href="#/add" class="btn btn-ghost btn-sm">Add Product</a>
+  </div>
+  <div class="navbar-end gap-1">
+    <label class="swap swap-rotate btn btn-ghost btn-circle">
+      <input type="checkbox" id="themeToggle">
+      <i data-lucide="sun" class="swap-off"></i>
+      <i data-lucide="moon" class="swap-on"></i>
+    </label>
+    <a href="#/cart" class="btn btn-ghost btn-circle">
+      <div class="indicator">
+        <i data-lucide="shopping-cart"></i>
+        <span id="cartBadge" class="badge badge-primary badge-sm indicator-item">0</span>
+      </div>
+    </a>
+  </div>
+</div>
+
+<!-- Main content -->
+<main id="app" class="container mx-auto p-4 max-w-6xl pb-16"></main>
+
+<!-- Toast container -->
+<div id="toasts" class="toast toast-end z-[100]"></div>
+
+<script>
+/* ============================================================
+   PWA: Manifest (data URI) + Service Worker (blob URL)
+   ============================================================ */
+const manifest = {
+  name: 'Shop', short_name: 'Shop', start_url: '.', display: 'standalone',
+  background_color: '#ffffff', theme_color: '#570df8',
+  icons: [{ src: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='100' fill='%23570df8'/%3E%3Ctext x='256' y='350' font-size='280' text-anchor='middle'%3E🛍%3C/text%3E%3C/svg%3E", sizes: '512x512', type: 'image/svg+xml' }]
+};
+const ml = document.createElement('link');
+ml.rel = 'manifest';
+ml.href = 'data:application/json,' + encodeURIComponent(JSON.stringify(manifest));
+document.head.appendChild(ml);
+
+if ('serviceWorker' in navigator) {
+  const sw = `
+    self.addEventListener('install', e => self.skipWaiting());
+    self.addEventListener('activate', e => self.clients.claim());
+    self.addEventListener('fetch', e => {
+      e.respondWith(
+        caches.open('shop-v1').then(c => c.match(e.request).then(r =>
+          r || fetch(e.request).then(resp => { c.put(e.request, resp.clone()); return resp; })
+            .catch(() => new Response('Offline'))))
+      );
+    });`;
+  navigator.serviceWorker.register(URL.createObjectURL(new Blob([sw], { type: 'application/javascript' }))).catch(() => {});
+}
+
+/* ============================================================
+   IndexedDB setup
+   ============================================================ */
+let db;
+const openDB = () => new Promise((res, rej) => {
+  const r = indexedDB.open('shop', 1);
+  r.onupgradeneeded = e => {
+    const d = e.target.result;
+    ['products', 'cart', 'settings'].forEach(s => {
+      if (!d.objectStoreNames.contains(s)) d.createObjectStore(s, { keyPath: 'id' });
+    });
+  };
+  r.onsuccess = e => { db = e.target.result; res(); };
+  r.onerror = e => rej(r.error);
+});
+
+// Generic DB helpers
+const dbReq = r => new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+const dbTx  = t => new Promise((res, rej) => { t.oncomplete = res; t.onerror = () => rej(t.error); });
+const DB = {
+  getAll: async s => { const t = db.transaction(s, 'readonly'), r = t.objectStore(s).getAll(); const v = await dbReq(r); await dbTx(t); return v; },
+  get:    async (s, id) => { const t = db.transaction(s, 'readonly'), r = t.objectStore(s).get(id); const v = await dbReq(r); await dbTx(t); return v; },
+  put:    async (s, d) => { const t = db.transaction(s, 'readwrite'), r = t.objectStore(s).put(d); const v = await dbReq(r); await dbTx(t); return v; },
+  delete: async (s, id) => { const t = db.transaction(s, 'readwrite'), r = t.objectStore(s).delete(id); await dbReq(r); await dbTx(t); },
+  clear:  async s => { const t = db.transaction(s, 'readwrite'), r = t.objectStore(s).clear(); await dbReq(r); await dbTx(t); }
+};
+
+/* ============================================================
+   Seed data: gradient SVGs stored as Blobs
+   ============================================================ */
+const svgBlob = (c1, c2, emoji) => new Blob([`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400">
+  <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="${c1}"/><stop offset="1" stop-color="${c2}"/>
+  </linearGradient></defs>
+  <rect width="400" height="400" fill="url(#g)"/>
+  <text x="200" y="260" font-size="200" text-anchor="middle">${emoji}</text>
+</svg>`], { type: 'image/svg+xml' });
+
+const SEED = [
+  { id: 'p1', name: 'Wireless Headphones', price: 99.99,  description: 'Premium noise-cancelling headphones with 30h battery life.', image: svgBlob('#6366f1', '#8b5cf6', '🎧') },
+  { id: 'p2', name: 'Smart Watch',         price: 199.99, description: 'Fitness tracker with heart rate monitor and GPS.',            image: svgBlob('#ec4899', '#f43f5e', '⌚') },
+  { id: 'p3', name: 'Camera',              price: 599.99, description: 'Mirrorless camera with 24MP sensor and 4K video.',            image: svgBlob('#10b981', '#059669', '📷') },
+  { id: 'p4', name: 'Laptop',              price: 1299.99,description: 'Powerful laptop with M2 chip and 16GB RAM.',                  image: svgBlob('#3b82f6', '#1d4ed8', '💻') },
+  { id: 'p5', name: 'Smartphone',          price: 899.99, description: 'Flagship phone with 120Hz display and triple camera.',        image: svgBlob('#f59e0b', '#d97706', '📱') },
+  { id: 'p6', name: 'Gaming Console',      price: 499.99, description: 'Next-gen console with 1TB storage.',                          image: svgBlob('#ef4444', '#b91c1c', '🎮') }
+];
+
+async function seedIfEmpty() {
+  if ((await DB.getAll('products')).length === 0) {
+    for (const p of SEED) await DB.put('products', p);
+  }
+}
+
+/* ============================================================
+   State & object URL tracking (memory hygiene)
+   ============================================================ */
+const objectUrls = new Map();
+const trackUrl = (key, blob) => { const u = URL.createObjectURL(blob); objectUrls.set(key, u); return u; };
+const revokeUrls = () => { objectUrls.forEach(u => URL.revokeObjectURL(u)); objectUrls.clear(); };
+
+/* ============================================================
+   Router (hash-based)
+   ============================================================ */
+const parseHash = () => {
+  const parts = (location.hash.slice(1) || '/').split('/').filter(Boolean);
+  return { path: parts[0] || '', param: parts[1] };
+};
+
+async function render() {
+  revokeUrls();
+  const { path, param } = parseHash();
+  const app = document.getElementById('app');
+  try {
+    if (path === 'product')  await viewProduct(param);
+    else if (path === 'cart')     await viewCart();
+    else if (path === 'checkout') await viewCheckout();
+    else if (path === 'add')      await viewAddProduct();
+    else                          await viewHome();
+  } catch (e) { app.innerHTML = `<div class="alert alert-error">${e.message}</div>`; }
+  lucide.createIcons();
+  updateBadge();
+}
+window.addEventListener('hashchange', render);
+
+/* ============================================================
+   Views
+   ============================================================ */
+async function viewHome() {
+  const products = await DB.getAll('products');
+  document.getElementById('app').innerHTML = `
+    <div class="fade-in">
+      <div class="hero bg-gradient-to-r from-primary to-secondary text-primary-content rounded-2xl mb-8 shadow-xl">
+        <div class="hero-content py-16 text-center">
+          <div>
+            <h1 class="text-4xl md:text-5xl font-bold">Welcome to Shop</h1>
+            <p class="py-4 md:text-lg">Discover amazing products at great prices</p>
+            <button class="btn btn-secondary" onclick="document.getElementById('grid').scrollIntoView({behavior:'smooth'})">
+              Shop Now <i data-lucide="arrow-down"></i>
+            </button>
+          </div>
+        </div>
+      </div>
+      <h2 id="grid" class="text-3xl font-bold mb-6">Featured Products</h2>
+      <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+        ${products.map(p => `
+          <div class="card bg-base-100 shadow hover:shadow-xl transition cursor-pointer" onclick="location.hash='#/product/${p.id}'">
+            <figure class="aspect-square bg-base-200"><img src="${trackUrl(p.id, p.image)}" alt="${p.name}" class="w-full h-full object-cover"></figure>
+            <div class="card-body p-4">
+              <h3 class="card-title text-sm">${p.name}</h3>
+              <p class="text-primary font-bold">$${p.price.toFixed(2)}</p>
+            </div>
+          </div>`).join('')}
+      </div>
+    </div>`;
+}
+
+async function viewProduct(id) {
+  const p = await DB.get('products', id);
+  if (!p) throw new Error('Product not found');
+  const url = trackUrl(p.id, p.image);
+  document.getElementById('app').innerHTML = `
+    <div class="fade-in">
+      <button class="btn btn-ghost mb-4" onclick="history.back()"><i data-lucide="arrow-left"></i> Back</button>
+      <div class="card lg:card-side bg-base-100 shadow-xl">
+        <figure class="lg:w-1/2 bg-base-200"><img src="${url}" alt="${p.name}" class="w-full h-full object-cover"></figure>
+        <div class="card-body">
+          <h2 class="card-title text-3xl">${p.name}</h2>
+          <p class="text-3xl text-primary font-bold">$${p.price.toFixed(2)}</p>
+          <p class="text-base-content/80">${p.description}</p>
+          <div class="card-actions justify-end mt-4">
+            <button class="btn btn-primary" onclick="addToCart('${p.id}')">
+              <i data-lucide="shopping-cart"></i> Add to Cart
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>`;
+}
+
+async function viewCart() {
+  const items = await DB.getAll('cart');
+  const app = document.getElementById('app');
+  if (items.length === 0) {
+    app.innerHTML = `
+      <div class="fade-in text-center py-16">
+        <i data-lucide="shopping-cart" class="w-24 h-24 mx-auto text-base-300 mb-4"></i>
+        <h2 class="text-2xl font-bold mb-2">Your cart is empty</h2>
+        <p class="mb-6">Add some products to get started</p>
+        <a href="#/" class="btn btn-primary">Browse Products</a>
+      </div>`;
+    return;
+  }
+  let total = 0;
+  const rows = [];
+  for (const item of items) {
+    const p = await DB.get('products', item.id);
+    if (!p) continue;
+    const url = trackUrl('cart-' + p.id, p.image);
+    const sub = p.price * item.quantity;
+    total += sub;
+    rows.push(`
+      <tr>
+        <td><div class="flex items-center gap-3">
+          <div class="avatar"><div class="mask mask-squircle w-12 h-12"><img src="${url}"></div></div>
+          <div><div class="font-bold">${p.name}</div><div class="text-sm opacity-60">$${p.price.toFixed(2)}</div></div>
+        </div></td>
+        <td>$${p.price.toFixed(2)}</td>
+        <td>
+          <div class="join">
+            <button class="join-item btn btn-sm" onclick="updateQty('${p.id}', ${item.quantity - 1})">−</button>
+            <button class="join-item btn btn-sm">${item.quantity}</button>
+            <button class="join-item btn btn-sm" onclick="updateQty('${p.id}', ${item.quantity + 1})">+</button>
+          </div>
+        </td>
+        <td class="font-semibold">$${sub.toFixed(2)}</td>
+        <td><button class="btn btn-ghost btn-sm text-error" onclick="removeFromCart('${p.id}')"><i data-lucide="trash-2"></i></button></td>
+      </tr>`);
+  }
+  app.innerHTML = `
+    <div class="fade-in">
+      <h2 class="text-3xl font-bold mb-6">Shopping Cart</h2>
+      <div class="overflow-x-auto">
+        <table class="table bg-base-100">
+          <thead><tr><th>Product</th><th>Price</th><th>Quantity</th><th>Total</th><th></th></tr></thead>
+          <tbody>${rows.join('')}</tbody>
+        </table>
+      </div>
+      <div class="flex justify-end mt-6">
+        <div class="card bg-base-100 shadow-xl w-full max-w-sm">
+          <div class="card-body">
+            <div class="flex justify-between text-xl font-bold">
+              <span>Total:</span><span class="text-primary">$${total.toFixed(2)}</span>
+            </div>
+            <a href="#/checkout" class="btn btn-primary mt-4">Checkout <i data-lucide="arrow-right"></i></a>
+          </div>
+        </div>
+      </div>
+    </div>`;
+}
+
+async function viewCheckout() {
+  if ((await DB.getAll('cart')).length === 0) { location.hash = '#/cart'; return; }
+  document.getElementById('app').innerHTML = `
+    <div class="fade-in">
+      <h2 class="text-3xl font-bold mb-6">Checkout</h2>
+      <form class="card bg-base-100 shadow-xl max-w-2xl mx-auto" onsubmit="submitCheckout(event)">
+        <div class="card-body">
+          <h3 class="text-xl font-bold mb-2">Shipping</h3>
+          <label class="form-control"><span class="label-text mb-1">Full Name</span>
+            <input type="text" class="input input-bordered" required></label>
+          <label class="form-control"><span class="label-text mb-1">Email</span>
+            <input type="email" class="input input-bordered" required></label>
+          <label class="form-control"><span class="label-text mb-1">Address</span>
+            <textarea class="textarea textarea-bordered" required></textarea></label>
+          <h3 class="text-xl font-bold mb-2 mt-4">Payment</h3>
+          <label class="form-control"><span class="label-text mb-1">Card Number</span>
+            <input type="text" class="input input-bordered" placeholder="1234 5678 9012 3456" required></label>
+          <div class="grid grid-cols-2 gap-4">
+            <label class="form-control"><span class="label-text mb-1">Expiry</span>
+              <input type="text" class="input input-bordered" placeholder="MM/YY" required></label>
+            <label class="form-control"><span class="label-text mb-1">CVC</span>
+              <input type="text" class="input input-bordered" placeholder="123" required></label>
+          </div>
+          <button type="submit" class="btn btn-primary mt-6">
+            <i data-lucide="lock"></i> Place Order
+          </button>
+        </div>
+      </form>
+    </div>`;
+}
+
+async function viewAddProduct() {
+  document.getElementById('app').innerHTML = `
+    <div class="fade-in">
+      <h2 class="text-3xl font-bold mb-6">Add New Product</h2>
+      <form class="card bg-base-100 shadow-xl max-w-2xl mx-auto" onsubmit="submitProduct(event)">
+        <div class="card-body">
+          <label class="form-control">
+            <span class="label-text mb-1">Product Image</span>
+            <input type="file" accept="image/*" id="pImg" class="file-input file-input-bordered" required>
+          </label>
+          <label class="form-control">
+            <span class="label-text mb-1">Name</span>
+            <input type="text" id="pName" class="input input-bordered" required>
+          </label>
+          <label class="form-control">
+            <span class="label-text mb-1">Price ($)</span>
+            <input type="number" id="pPrice" step="0.01" min="0" class="input input-bordered" required>
+          </label>
+          <label class="form-control">
+            <span class="label-text mb-1">Description</span>
+            <textarea id="pDesc" class="textarea textarea-bordered" required></textarea>
+          </label>
+          <button type="submit" class="btn btn-primary mt-2">
+            <i data-lucide="plus"></i> Add Product
+          </button>
+        </div>
+      </form>
+    </div>`;
+}
+
+/* ============================================================
+   Cart logic
+   ============================================================ */
+async function addToCart(id) {
+  const item = (await DB.get('cart', id)) || { id, quantity: 0 };
+  item.quantity++;
+  await DB.put('cart', item);
+  await updateBadge();
+  toast('Added to cart');
+}
+
+async function updateQty(id, qty) {
+  if (qty <= 0) await DB.delete('cart', id);
+  else { const it = await DB.get('cart', id); it.quantity = qty; await DB.put('cart', it); }
+  await viewCart(); lucide.createIcons(); await updateBadge();
+}
+
+async function removeFromCart(id) {
+  await DB.delete('cart', id);
+  await viewCart(); lucide.createIcons(); await updateBadge();
+  toast('Removed');
+}
+
+async function updateBadge() {
+  const items = await DB.getAll('cart');
+  const n = items.reduce((s, i) => s + i.quantity, 0);
+  document.getElementById('cartBadge').textContent = n;
+}
+
+/* ============================================================
+   Form submissions
+   ============================================================ */
+async function submitProduct(e) {
+  e.preventDefault();
+  const file = document.getElementById('pImg').files[0];
+  await DB.put('products', {
+    id: 'p' + Date.now(),
+    name: document.getElementById('pName').value,
+    price: parseFloat(document.getElementById('pPrice').value),
+    description: document.getElementById('pDesc').value,
+    image: file // File is a Blob — stored efficiently in IndexedDB
+  });
+  toast('Product added!');
+  location.hash = '#/';
+}
+
+async function submitCheckout(e) {
+  e.preventDefault();
+  await DB.clear('cart');
+  await updateBadge();
+  toast('Order placed successfully! 🎉');
+  location.hash = '#/';
+}
+
+/* ============================================================
+   UI helpers
+   ============================================================ */
+function toast(msg, type = 'success') {
+  const el = document.createElement('div');
+  el.className = `alert alert-${type} shadow-lg`;
+  el.innerHTML = `<i data-lucide="${type === 'success' ? 'check-circle' : 'alert-circle'}"></i><span>${msg}</span>`;
+  document.getElementById('toasts').appendChild(el);
+  lucide.createIcons();
+  setTimeout(() => el.remove(), 2500);
+}
+
+/* ============================================================
+   Theme toggle (persisted in IndexedDB)
+   ============================================================ */
+async function toggleTheme() {
+  const cur = document.documentElement.getAttribute('data-theme');
+  const next = cur === 'light' ? 'dark' : 'light';
+  document.documentElement.setAttribute('data-theme', next);
+  await DB.put('settings', { id: 'theme', value: next });
+}
+
+/* ============================================================
+   Init
+   ============================================================ */
+(async () => {
+  await openDB();
+  // Restore theme
+  const t = await DB.get('settings', 'theme');
+  if (t) {
+    document.documentElement.setAttribute('data-theme', t.value);
+    document.getElementById('themeToggle').checked = t.value === 'dark';
+  }
+  document.getElementById('themeToggle').addEventListener('change', toggleTheme);
+  await seedIfEmpty();
+  await render();
+})();
+</script>
+</body>
+</html>
